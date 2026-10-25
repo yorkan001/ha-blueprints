@@ -1,0 +1,223 @@
+blueprint:
+  name: Siguran impuls za vrata (safe gate/garage impulse)
+  author: Haru Home Assistant (netvis.hr)
+  homeassistant:
+    min_version: 2024.10.0
+  domain: script
+  description: >-
+    Skripta koja na relej kliznih/krilnih ili garažnih vrata šalje **točno JEDAN
+    impuls**, ali samo kad je to sigurno. Namijenjeno vratima **bez fotoćelija**
+    (gates without photocells), gdje drugi impuls usred kretanja može zaustaviti
+    ili okrenuti vrata.
+
+
+    **Pravilo (the rule):**
+
+    - šalje se najviše jedan impuls po pozivu – nikad drugi, "korektivni" impuls;
+
+    - relej mora biti dostupan, u stanju mirovanja i nepromijenjen barem
+    zadani broj sekundi (inače se vrata vjerojatno još kreću);
+
+    - kontaktni senzor vrata mora biti dostupan i u dozvoljenom stanju
+    (npr. *zatvorena*) stabilno barem zadani broj sekundi;
+
+    - ako uvjeti nisu ispunjeni, ništa se ne šalje, pokreću se opcionalne akcije
+    "Kad je odbijeno" s varijablom `razlog` (npr. 'vrata se kreću',
+    'vrata nisu zatvorena', 'senzor nedostupan', 'relej nedostupan').
+
+    Ponovljeni pozivi dok skripta radi tiho se ignoriraju (mode: single).
+
+
+    **Preporuka:** za način `turn_on` na samom uređaju uključite automatsko
+    isključenje (npr. Shelly *Auto off* 1 s), tako da impuls traje i kad je
+    Home Assistant nedostupan.
+
+
+    **Primjer poziva iz automatizacije (example):**
+
+    ```yaml
+
+    actions:
+      - action: script.siguran_impuls_vrata_dvoriste
+    ```
+
+    U akcijama "Kad je odbijeno" možete koristiti npr.
+    `message: "Vrata nisu pokrenuta: {{ razlog }}"`.
+  input:
+    relej:
+      name: Relej za impuls (impulse relay)
+      description: Prekidač (switch) koji daje impuls upravljačkoj jedinici vrata.
+      selector:
+        entity:
+          filter:
+            - domain: switch
+    nacin_impulsa:
+      name: Način impulsa (impulse mode)
+      description: >-
+        `turn_on` – relej miruje isključen, impuls je uključenje (auto-off na
+        uređaju ga vraća). `turn_off` – relej miruje uključen (npr. Sonoff
+        MINI-ZBD), impuls je isključenje. `turn_on_then_off` – skripta uključi pa
+        isključi relej nakon trajanja impulsa.
+      default: turn_on
+      selector:
+        select:
+          mode: list
+          options:
+            - label: "turn_on – relej miruje isključen, impuls = uključenje (auto-off na uređaju)"
+              value: turn_on
+            - label: "turn_off – relej miruje uključen, impuls = isključenje (npr. Sonoff MINI-ZBD)"
+              value: turn_off
+            - label: "turn_on_then_off – uključi pa isključi nakon trajanja impulsa"
+              value: turn_on_then_off
+    trajanje_impulsa:
+      name: Trajanje impulsa (pulse length)
+      description: Koristi se samo za način `turn_on_then_off`.
+      default: 1
+      selector:
+        number:
+          min: 0.2
+          max: 5
+          step: 0.1
+          unit_of_measurement: s
+          mode: slider
+    senzor:
+      name: Kontaktni senzor vrata (gate contact sensor)
+      selector:
+        entity:
+          filter:
+            - domain: binary_sensor
+    senzor_otvoreno_stanje:
+      name: Stanje senzora koje znači OTVORENO (state meaning open)
+      description: Za većinu senzora vrata/prozora 'on' znači otvoreno.
+      default: "on"
+      selector:
+        select:
+          options:
+            - label: "on = otvoreno"
+              value: "on"
+            - label: "off = otvoreno"
+              value: "off"
+    dozvoljeno_kad:
+      name: Impuls dozvoljen kad su vrata (allowed when gate is)
+      default: zatvorena
+      selector:
+        select:
+          options:
+            - label: "zatvorena – samo naredba za otvaranje (only when closed)"
+              value: zatvorena
+            - label: "otvorena – samo naredba za zatvaranje (only when open)"
+              value: otvorena
+            - label: "oboje – bilo koje stabilno stanje (any stable state)"
+              value: oboje
+    stabilno_sekundi:
+      name: Senzor stabilan barem (sensor stable for)
+      description: Senzor mora biti u dozvoljenom stanju barem ovoliko sekundi.
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 300
+          step: 1
+          unit_of_measurement: s
+          mode: box
+    relej_miran_sekundi:
+      name: Relej miran barem (relay idle for)
+      description: >-
+        Relej se ne smije mijenjati ovoliko sekundi (inače se vrata vjerojatno
+        još kreću). Isto vrijeme (najviše 20 s) skripta nakon impulsa čeka i
+        ignorira ponovljene pozive.
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 600
+          step: 1
+          unit_of_measurement: s
+          mode: box
+    kad_uspjelo:
+      name: Kad je impuls poslan (after successful impulse)
+      description: Opcionalne dodatne akcije nakon impulsa (npr. snimka kamere).
+      default: []
+      selector:
+        action: {}
+    kad_odbijeno:
+      name: Kad je odbijeno (when refused)
+      description: >-
+        Opcionalne akcije kad impuls NIJE poslan, npr. obavijest na mobitel.
+        Dostupna je varijabla `razlog` (tekst razloga na hrvatskom).
+      default: []
+      selector:
+        action: {}
+
+mode: single
+max_exceeded: silent
+
+variables:
+  relej: !input relej
+  senzor: !input senzor
+  nacin_impulsa: !input nacin_impulsa
+  trajanje_impulsa: !input trajanje_impulsa
+  senzor_otvoreno_stanje: !input senzor_otvoreno_stanje
+  dozvoljeno_kad: !input dozvoljeno_kad
+  stabilno_sekundi: !input stabilno_sekundi
+  relej_miran_sekundi: !input relej_miran_sekundi
+
+sequence:
+  - variables:
+      razlog: >-
+        {%- set rs = states(relej) -%}
+        {%- set ss = states(senzor) -%}
+        {%- set mir = 'on' if nacin_impulsa == 'turn_off' else 'off' -%}
+        {%- set otv = senzor_otvoreno_stanje | string -%}
+        {%- set zat = 'off' if otv == 'on' else 'on' -%}
+        {%- if rs in ['unavailable', 'unknown', 'none', ''] or states[relej] is none -%}
+          relej nedostupan
+        {%- elif rs != mir -%}
+          vrata se kreću (relej nije u stanju mirovanja)
+        {%- elif (now() - states[relej].last_changed).total_seconds() < relej_miran_sekundi | float(60) -%}
+          vrata se kreću
+        {%- elif ss in ['unavailable', 'unknown', 'none', ''] or states[senzor] is none -%}
+          senzor nedostupan
+        {%- elif ss not in ['on', 'off'] -%}
+          senzor nedostupan
+        {%- elif dozvoljeno_kad == 'zatvorena' and ss != zat -%}
+          vrata nisu zatvorena
+        {%- elif dozvoljeno_kad == 'otvorena' and ss != otv -%}
+          vrata nisu otvorena
+        {%- elif (now() - states[senzor].last_changed).total_seconds() < stabilno_sekundi | float(5) -%}
+          vrata se kreću (stanje senzora još nije stabilno)
+        {%- endif -%}
+  - if:
+      - condition: template
+        value_template: "{{ razlog | trim == '' }}"
+    then:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ nacin_impulsa == 'turn_off' }}"
+            sequence:
+              - action: switch.turn_off
+                target:
+                  entity_id: "{{ relej }}"
+          - conditions:
+              - condition: template
+                value_template: "{{ nacin_impulsa == 'turn_on_then_off' }}"
+            sequence:
+              - action: switch.turn_on
+                target:
+                  entity_id: "{{ relej }}"
+              - delay:
+                  milliseconds: "{{ (trajanje_impulsa | float(1) * 1000) | int }}"
+              - action: switch.turn_off
+                target:
+                  entity_id: "{{ relej }}"
+        default:
+          - action: switch.turn_on
+            target:
+              entity_id: "{{ relej }}"
+      - sequence: !input kad_uspjelo
+      - delay:
+          seconds: "{{ [relej_miran_sekundi | float(60), 20] | min | int }}"
+    else:
+      - sequence: !input kad_odbijeno
+      - stop: Impuls nije poslan (uvjeti nisu ispunjeni)
